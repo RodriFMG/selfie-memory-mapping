@@ -1277,6 +1277,9 @@ void     implement_read(uint64_t* context);
 void emit_write();
 void implement_write(uint64_t* context);
 
+void emit_mmap();
+void implement_mmap(uint64_t* context);
+
 void     emit_open();
 uint64_t down_load_string(uint64_t* context, uint64_t vstring, char* s);
 void     implement_openat(uint64_t* context);
@@ -1998,7 +2001,7 @@ uint64_t run = 0; // flag for running code
 
 uint64_t debug = 0; // // flag for recording and debugging code
 
-uint64_t debug_syscalls = 0; // flag for debugging syscalls
+uint64_t debug_syscalls = 1; // flag for debugging syscalls
 
 uint64_t record = 0; // flag for recording code execution
 uint64_t redo   = 0; // flag for redoing code execution
@@ -8130,7 +8133,16 @@ void implement_mmap(uint64_t* context){
 
   if (debug_syscalls){
     printf("(mmap): ");
-    // acá colocame los print registers
+    print_register_value(REG_A0);   // addr
+    printf(",");
+    print_register_value(REG_A1);   // length
+    printf(",");
+    print_register_value(REG_A2);   // prot
+    printf(",");
+    print_register_value(REG_A3);   // fd
+    printf(",");
+    print_register_value(REG_A4);   // offset
+    println();
   }
 
   // rescatar valores de los regs
@@ -8165,7 +8177,10 @@ void implement_mmap(uint64_t* context){
 
       // se rellena el buffer
       read(fd, cacheframe, PAGESIZE);
-    
+
+      // debug <- lee bien el file y se guarda en el cacheframe?
+      printf("DEBUG: frame[0] = 0x%lX\n", *cacheframe);
+
       // se crea la instancia en el cachepage como direccion
       build_cachepage(fileid, offset, (uint64_t) cacheframe);
     }
@@ -8190,6 +8205,9 @@ void implement_mmap(uint64_t* context){
 
   // retorno
   *(get_regs(context) + REG_A0) = addr;
+
+  printf("MMAP llamado: addr=%lu length=%lu prot=%lu fd=%lu offset=%lu\n",
+    addr, length, prot, fd, initial_offset);
 
   // avanzar posi
   set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
@@ -10142,6 +10160,29 @@ void record_load() {
       record_state(*(registers + rd));
 }
 
+uint64_t is_mmap_address(uint64_t* context, uint64_t vaddr) {
+  uint64_t i;
+  uint64_t* mapping;
+  uint64_t addr;
+  uint64_t length;
+
+  i = 0;
+  while (i < get_mmap_count(context)) {
+    mapping = get_mapping_i(context, i);
+    addr    = get_mapping_addr(mapping);
+    length  = get_mapping_length(mapping);
+
+    // el vaddr cae en [addr, addr + length)
+    if (vaddr >= addr)
+      if (vaddr < addr + length)
+        return 1;
+
+    i = i + 1;
+  }
+
+  return 0;
+}
+
 uint64_t do_load() {
   uint64_t vaddr;
   uint64_t next_rd_value;
@@ -11892,6 +11933,8 @@ uint64_t is_valid_segment_read(uint64_t vaddr) {
     heap_reads = heap_reads + 1;
 
     return 1;
+  } else if(is_mmap_address(current_context, vaddr)) {
+    return 1;
   } else
     return 0;
 }
@@ -11909,7 +11952,10 @@ uint64_t is_valid_segment_write(uint64_t vaddr) {
     heap_writes = heap_writes + 1;
 
     return 1;
-  } else
+  }
+   else if(is_mmap_address(current_context, vaddr)){
+    return 1;
+   } else
     return 0;
 }
 
