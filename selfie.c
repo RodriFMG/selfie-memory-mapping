@@ -2191,6 +2191,8 @@ void reset_profiler() {
 // ------------------------ MACHINE CONTEXTS -----------------------
 // -----------------------------------------------------------------
 
+// máximo de file ids que puede
+uint64_t MAXFILEIDS = 64;
 uint64_t* new_context();
 
 void init_context(uint64_t* context, uint64_t* parent, uint64_t* vctxt);
@@ -2246,11 +2248,13 @@ void unblock_context(uint64_t* context);
 // | 35 | number of children	| number of forked children
 // | 36 | child exit code		| exit status code of last exited child
 // | 37 | child pid				| pid of exited child
+// | 38 | mapping         | para la syscall de mmap
+// | 39 | file id         | file id global del fd local del proceso.
 
 // number of entries of a machine context:
 // 14 uint64_t + 6 uint64_t* + 1 char* + 7 uint64_t + 2 uint64_t* + 2 uint64_t entries
 // extended in the symbolic execution engine and the Boehm garbage collector
-uint64_t CONTEXTENTRIES = 39;
+uint64_t CONTEXTENTRIES = 40;
 uint64_t N_CONTEXTS = 0;
 uint64_t* RUNNING = (uint64_t*) 0;
 uint64_t N_BLOCKED_CONTEXTS = 0;
@@ -2351,6 +2355,8 @@ uint64_t get_status(uint64_t* context) { return *(context + 34); }
 uint64_t get_nchildren(uint64_t* context) { return *(context + 35); }
 uint64_t get_child_exit_code(uint64_t* context) { return *(context + 36); }
 uint64_t get_child_pid (uint64_t* context) { return *(context + 37); }
+uint64_t* get_mappings(uint64_t* context){ return (uint64_t*) *(context + 38); }
+uint64_t* get_fileids(uint64_t* context) {return (uint64_t*) *(context + 39); }
 
 void set_next_context(uint64_t* context, uint64_t* next)     { *context        = (uint64_t) next; }
 void set_prev_context(uint64_t* context, uint64_t* prev)     { *(context + 1)  = (uint64_t) prev; }
@@ -2392,12 +2398,18 @@ void set_status(uint64_t* context, uint64_t status) { *(context + 34) = status; 
 void set_nchildren(uint64_t* context, uint64_t nchildren) { *(context + 35) = nchildren; }
 void set_child_exit_code(uint64_t* context, uint64_t exit_code) { *(context + 36) = exit_code; }
 void set_child_pid(uint64_t* context, uint64_t child_pid) { *(context + 37) = child_pid; }
-
-
-// mapping get / set
-uint64_t* get_mappings(uint64_t* context){ return (uint64_t*) *(context + 38); }
 void set_mappings(uint64_t* context, uint64_t* mmap){ *(context + 38) = (uint64_t) mmap; }
+void set_fileids(uint64_t* context, uint64_t* nfileids){ *(context + 39) = (uint64_t) nfileids; }
 
+
+void set_context_fileid(uint64_t* context, uint64_t fd, uint64_t file_id){
+
+  if (fd == MAXFILEIDS) printf("MAXIMO DE FILEIDS POR PROCESO ALCANZADO!\n");
+
+  if(fd < MAXFILEIDS){
+    *(get_fileids(context) + fd) = file_id;
+  }
+}
 
 // -----------------------------------------------------------------
 // -------------------------- MICROKERNEL --------------------------
@@ -7884,11 +7896,159 @@ uint64_t down_load_string(uint64_t* context, uint64_t vstring, char* s) {
   return copy_buffer(context, vstring, (uint64_t*) s, 0, 0);
 }
 
+
+// -----------------------------------------------------------------
+// ---------------------------- Proyecto OS ------------------------
+// -----------------------------------------------------------------
+
+
+// -----------------------------------------------------------------
+// -------------------------- Cache Page ---------------------------
+// -----------------------------------------------------------------
+
+uint64_t CachePageEntries = 4;
+uint64_t* used_cachepage = (uint64_t*) 0;
+
+// ------------------------- Machine Cache Page ---------------------
+// 0 <- next_cachepage_row
+// 1 <- file id
+// 2 <- offset
+// 3 <- cache frame address
+// ------------------------------------------------------------------
+
+uint64_t* get_next_cachepage(uint64_t* cachepage){ return (uint64_t*) *cachepage; }
+uint64_t get_fileid(uint64_t* cachepage){ return *(cachepage + 1); }
+uint64_t get_offset(uint64_t* cachepage){ return *(cachepage + 2); }
+uint64_t* get_cacheframe(uint64_t* cachepage){ return (uint64_t*) *(cachepage + 3); }
+
+void set_next_cachepage(uint64_t* cachepage, uint64_t* next_cachepage){ *cachepage = (uint64_t) next_cachepage; }
+void set_fileid(uint64_t* cachepage, uint64_t fileid){ *(cachepage + 1) = fileid; }
+void set_offset(uint64_t* cachepage, uint64_t offset){ *(cachepage + 2) = offset; }
+void set_cacheframe(uint64_t* cachepage, uint64_t* cacheframe){ *(cachepage + 3) = (uint64_t) cacheframe; }
+
+uint64_t* allocate_cachepage(){
+  // Se reserva el espacio ocupado por un cache page node
+  return smalloc(CachePageEntries * sizeof(uint64_t));
+}
+
+
+// funciona como un push forward
+uint64_t* new_cachepage(){
+  uint64_t* cachepage;
+  cachepage = allocate_cachepage();
+
+  /* Si se quiere des mapear, acá habría que manear un free_cachepage, como en context, por el momento sería asi */
+
+  // la posicion siguiente sea el anterior primer cachepage
+  set_next_cachepage(cachepage, used_cachepage);
+
+  // apuntamos al primer cachepage
+  used_cachepage = cachepage;
+
+  return cachepage;
+
+}
+
+uint64_t* build_cachepage(uint64_t fileid, uint64_t offset, uint64_t* cacheframe){
+  
+  uint64_t* cachepage = new_cachepage();
+ 
+  // si se agrega un campo más, se coloca acá.
+  set_fileid(cachepage, fileid);
+  set_offset(cachepage, offset);
+  set_cacheframe(cachepage, cacheframe);
+
+  return cachepage;
+}
+
+uint64_t* find_cachepage(uint64_t fileid, uint64_t offset){
+
+  uint64_t* state = used_cachepage;
+
+  while(state != (uint64_t*) 0){
+
+    if(get_fileid(state) == fileid){
+
+      // Encontro el cache page!, devuelve el nodo entero.
+      if(get_offset(state) == offset) return state;
+    }
+
+    state = get_next_cachepage(state);
+  }
+
+
+  // no lo encontró!
+  return (uint64_t*) 0;
+
+}
+
+// ----------------------------------------------------------------
+// ------------------ mapping global file id ----------------------
+// ----------------------------------------------------------------
+
+uint64_t global_accumulator = 0;
+uint64_t fileid_entries = 3;
+uint64_t* used_node_fileid = (uint64_t*) 0;
+
+uint64_t* get_next_fileid(uint64_t* node_fileid){ return (uint64_t*) *node_fileid; }
+char* get_name_fileid(uint64_t* node_fileid){ return (char*) *(node_fileid + 1); }
+uint64_t get_global_fileid(uint64_t* node_fileid){ return *(node_fileid + 2); }
+
+void set_next_fileid(uint64_t* node_fileid, uint64_t* next_node_fileid){ *node_fileid = (uint64_t) next_node_fileid; }
+void set_name_fileid(uint64_t* node_fileid, char* name_fileid){ *(node_fileid + 1) = (uint64_t) name_fileid; }
+void set_global_fileid(uint64_t* node_fileid, uint64_t global_fileid){ *(node_fileid + 2) = global_fileid; }
+
+uint64_t* allocate_node_fileid(){
+  // Se reserva el espacio ocupado por un cache page node
+  return smalloc(fileid_entries * sizeof(uint64_t));
+}
+
+
+// funciona como un push forward
+uint64_t* new_node_fileid(){
+  uint64_t* node_fileid;
+
+  node_fileid = allocate_node_fileid();
+  set_next_fileid(node_fileid, used_node_fileid);
+  used_node_fileid = node_fileid;
+
+  return node_fileid;
+}
+
+uint64_t* build_node_fileid(char* filename){
+  
+  uint64_t* node_fileid = new_node_fileid();
+
+  set_name_fileid(node_fileid, string_copy(filename));
+  set_global_fileid(node_fileid, global_accumulator);
+
+  global_accumulator = global_accumulator + 1;
+
+  return node_fileid;
+}
+
+uint64_t find_or_create_fileid(char* filename){
+
+  uint64_t* state = used_node_fileid;
+
+  while(state != (uint64_t*) 0){
+    if( string_compare(filename, get_name_fileid(state)) ){ return get_global_fileid(state); }
+    state = get_next_fileid(state);
+  }
+  
+  // si no lo encuentra, lo crea!
+  state = build_node_fileid(filename);
+  return get_global_fileid(state);
+}
+
+
 void implement_openat(uint64_t* context) {
   // parameters
   uint64_t vfilename;
   uint64_t flags;
   uint64_t mode;
+  uint64_t fd;
+  uint64_t file_id;
 
   if (debug_syscalls) {
     printf("(openat): ");
@@ -7919,6 +8079,16 @@ void implement_openat(uint64_t* context) {
       flags = O_CREAT_TRUNC_WRONLY;
 
     *(get_regs(context) + REG_A0) = open(filename_buffer, flags, mode);
+
+    // si el openat fue exitoso, entonces se guarda en los fileids
+
+    // se aprovecha que fd es incremental, acceder al file id desde el proceso: context -> fileids + fd |-> file id global del file fd local.
+    fd = *(get_regs(context) + REG_A0);
+    if(signed_less_than(fd, 0) == 0){
+      file_id = find_or_create_fileid(filename_buffer);
+      set_context_fileid(context, fd, file_id);
+    }
+
   } else
     *(get_regs(context) + REG_A0) = sign_shrink(-1, SYSCALL_BITWIDTH);
 
@@ -7933,6 +8103,7 @@ void implement_openat(uint64_t* context) {
     print_register_value(REG_A0);
     println();
   }
+
 }
 
 void emit_malloc() {
@@ -11194,8 +11365,8 @@ void init_context(uint64_t* context, uint64_t* parent, uint64_t* vctxt) {
   set_status(context, STATUS_READY);
   set_nchildren(context, 0);
 
-  // mapping vacio
-  set_mappings(context, (uint64_t*) 0);
+  set_mappings(context, (uint64_t*) 0);  
+  set_fileids(context, zmalloc(MAXFILEIDS * sizeof(uint64_t)));
 
 }
 
@@ -11586,149 +11757,6 @@ uint64_t is_valid_segment_write(uint64_t vaddr) {
     return 0;
 }
 
-// -----------------------------------------------------------------
-// ---------------------------- Proyecto OS ------------------------
-// -----------------------------------------------------------------
-
-
-// -----------------------------------------------------------------
-// -------------------------- Cache Page ---------------------------
-// -----------------------------------------------------------------
-
-uint64_t CachePageEntries = 4;
-uint64_t* used_cachepage = (uint64_t*) 0;
-
-// ------------------------- Machine Cache Page ---------------------
-// 0 <- next_cachepage_row
-// 1 <- file id
-// 2 <- offset
-// 3 <- cache frame address
-// ------------------------------------------------------------------
-
-uint64_t* get_next_cachepage(uint64_t* cachepage){ return (uint64_t*) *cachepage; }
-uint64_t get_fileid(uint64_t* cachepage){ return *(cachepage + 1); }
-uint64_t get_offset(uint64_t* cachepage){ return *(cachepage + 2); }
-uint64_t* get_cacheframe(uint64_t* cachepage){ return (uint64_t*) *(cachepage + 3); }
-
-void set_next_cachepage(uint64_t* cachepage, uint64_t* next_cachepage){ *cachepage = (uint64_t) next_cachepage; }
-void set_fileid(uint64_t* cachepage, uint64_t fileid){ *(cachepage + 1) = fileid; }
-void set_offset(uint64_t* cachepage, uint64_t offset){ *(cachepage + 2) = offset; }
-void set_cacheframe(uint64_t* cachepage, uint64_t* cacheframe){ *(cachepage + 3) = (uint64_t) cacheframe; }
-
-uint64_t* allocate_cachepage(){
-  // Se reserva el espacio ocupado por un cache page node
-  return smalloc(CachePageEntries * sizeof(uint64_t));
-}
-
-
-// funciona como un push forward
-uint64_t* new_cachepage(){
-  uint64_t* cachepage;
-  cachepage = allocate_cachepage();
-
-  /* Si se quiere des mapear, acá habría que manear un free_cachepage, como en context, por el momento sería asi */
-
-  // la posicion siguiente sea el anterior primer cachepage
-  set_next_cachepage(cachepage, used_cachepage);
-
-  // apuntamos al primer cachepage
-  used_cachepage = cachepage;
-
-  return cachepage;
-
-}
-
-uint64_t* build_cachepage(uint64_t fileid, uint64_t offset, uint64_t* cacheframe){
-  
-  uint64_t* cachepage = new_cachepage();
- 
-  // si se agrega un campo más, se coloca acá.
-  set_fileid(cachepage, fileid);
-  set_offset(cachepage, offset);
-  set_cacheframe(cachepage, cacheframe);
-
-  return cachepage;
-}
-
-uint64_t* find_cachepage(uint64_t fileid, uint64_t offset){
-
-  uint64_t* state = used_cachepage;
-
-  while(state != (uint64_t*) 0){
-
-    if(get_fileid(state) == fileid){
-
-      // Encontro el cache page!, devuelve el nodo entero.
-      if(get_offset(state) == offset) return state;
-    }
-
-    state = get_next_cachepage(state);
-  }
-
-
-  // no lo encontró!
-  return (uint64_t*) 0;
-
-}
-
-// ----------------------------------------------------------------
-// ------------------ mapping global file id ----------------------
-// ----------------------------------------------------------------
-
-uint64_t global_accumulator = 0;
-uint64_t fileid_entries = 3;
-uint64_t* used_node_fileid = (uint64_t*) 0;
-
-uint64_t* get_next_fileid(uint64_t* node_fileid){ return (uint64_t*) *node_fileid; }
-char* get_name_fileid(uint64_t* node_fileid){ return (char*) *(node_fileid + 1); }
-uint64_t get_global_fileid(uint64_t* node_fileid){ return *(node_fileid + 2); }
-
-void set_next_fileid(uint64_t* node_fileid, uint64_t* next_node_fileid){ *node_fileid = (uint64_t) next_node_fileid; }
-void set_name_fileid(uint64_t* node_fileid, char* name_fileid){ *(node_fileid + 1) = (uint64_t) name_fileid; }
-void set_global_fileid(uint64_t* node_fileid, uint64_t global_fileid){ *(node_fileid + 2) = global_fileid; }
-
-uint64_t* allocate_node_fileid(){
-  // Se reserva el espacio ocupado por un cache page node
-  return smalloc(fileid_entries * sizeof(uint64_t));
-}
-
-
-// funciona como un push forward
-uint64_t* new_node_fileid(){
-  uint64_t* node_fileid;
-
-  node_fileid = allocate_node_fileid();
-  set_next_fileid(node_fileid, used_node_fileid);
-  used_node_fileid = node_fileid;
-
-  return node_fileid;
-}
-
-uint64_t* build_node_fileid(char* filename){
-  
-  uint64_t* node_fileid = new_node_fileid();
-
-  set_name_fileid(node_fileid, string_copy(filename));
-  set_global_fileid(node_fileid, global_accumulator);
-
-  global_accumulator = global_accumulator + 1;
-
-  return node_fileid;
-}
-
-uint64_t find_or_create_fileid(char* filename){
-
-  uint64_t* state = used_node_fileid;
-
-  while(state != (uint64_t*) 0){
-    if( string_compare(filename, get_name_fileid(state)) ){ return get_global_fileid(state); }
-    state = get_next_fileid(state);
-  }
-  
-  // si no lo encuentra, lo crea!
-  state = build_node_fileid(filename);
-  return get_global_fileid(state);
-}
 
 // -----------------------------------------------------------------
 // ---------------------------- KERNEL -----------------------------
