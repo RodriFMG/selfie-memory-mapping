@@ -1315,6 +1315,8 @@ uint64_t SYSCALL_WAIT	= 216;
 
 uint64_t DIRFD_AT_FDCWD = -100;
 
+uint64_t SYSCALL_MMAP = 997;
+
 // ------------------------ GLOBAL VARIABLES -----------------------
 
 uint64_t* IO_buffer      = (uint64_t*) 0;
@@ -2193,6 +2195,10 @@ void reset_profiler() {
 
 // máximo de file ids que puede
 uint64_t MAXFILEIDS = 64;
+
+uint64_t MAXMAPPINGS = 128;
+uint64_t MAPPINGFIELDS = 5;
+
 uint64_t* new_context();
 
 void init_context(uint64_t* context, uint64_t* parent, uint64_t* vctxt);
@@ -2250,11 +2256,12 @@ void unblock_context(uint64_t* context);
 // | 37 | child pid				| pid of exited child
 // | 38 | mapping         | para la syscall de mmap
 // | 39 | file id         | file id global del fd local del proceso.
+// | 40 | mmap count      | se podría no usar si se usa linked dinamicos en el mmap (futuro...)
 
 // number of entries of a machine context:
 // 14 uint64_t + 6 uint64_t* + 1 char* + 7 uint64_t + 2 uint64_t* + 2 uint64_t entries
 // extended in the symbolic execution engine and the Boehm garbage collector
-uint64_t CONTEXTENTRIES = 40;
+uint64_t CONTEXTENTRIES = 41;
 uint64_t N_CONTEXTS = 0;
 uint64_t* RUNNING = (uint64_t*) 0;
 uint64_t N_BLOCKED_CONTEXTS = 0;
@@ -2357,6 +2364,7 @@ uint64_t get_child_exit_code(uint64_t* context) { return *(context + 36); }
 uint64_t get_child_pid (uint64_t* context) { return *(context + 37); }
 uint64_t* get_mappings(uint64_t* context){ return (uint64_t*) *(context + 38); }
 uint64_t* get_fileids(uint64_t* context) {return (uint64_t*) *(context + 39); }
+uint64_t get_mmap_count(uint64_t* context) {return *(context + 40); }
 
 void set_next_context(uint64_t* context, uint64_t* next)     { *context        = (uint64_t) next; }
 void set_prev_context(uint64_t* context, uint64_t* prev)     { *(context + 1)  = (uint64_t) prev; }
@@ -2400,11 +2408,11 @@ void set_child_exit_code(uint64_t* context, uint64_t exit_code) { *(context + 36
 void set_child_pid(uint64_t* context, uint64_t child_pid) { *(context + 37) = child_pid; }
 void set_mappings(uint64_t* context, uint64_t* mmap){ *(context + 38) = (uint64_t) mmap; }
 void set_fileids(uint64_t* context, uint64_t* nfileids){ *(context + 39) = (uint64_t) nfileids; }
-
+void set_mmap_count(uint64_t* context, uint64_t mmap_count){ *(context + 40) = mmap_count; }
 
 void set_context_fileid(uint64_t* context, uint64_t fd, uint64_t file_id){
 
-  if (fd == MAXFILEIDS) printf("MAXIMO DE FILEIDS POR PROCESO ALCANZADO!\n");
+  if (fd >= MAXFILEIDS) printf("MAXIMO DE FILEIDS POR PROCESO ALCANZADO!\n");
 
   if(fd < MAXFILEIDS){
     *(get_fileids(context) + fd) = file_id;
@@ -6382,6 +6390,7 @@ void selfie_compile() {
   emit_fork();
   emit_wait();
   emit_open();
+  emit_mmap();
 
   emit_malloc();
 
@@ -7919,12 +7928,12 @@ uint64_t* used_cachepage = (uint64_t*) 0;
 uint64_t* get_next_cachepage(uint64_t* cachepage){ return (uint64_t*) *cachepage; }
 uint64_t get_fileid(uint64_t* cachepage){ return *(cachepage + 1); }
 uint64_t get_offset(uint64_t* cachepage){ return *(cachepage + 2); }
-uint64_t* get_cacheframe(uint64_t* cachepage){ return (uint64_t*) *(cachepage + 3); }
+uint64_t get_cacheframe(uint64_t* cachepage){ return *(cachepage + 3); }
 
 void set_next_cachepage(uint64_t* cachepage, uint64_t* next_cachepage){ *cachepage = (uint64_t) next_cachepage; }
 void set_fileid(uint64_t* cachepage, uint64_t fileid){ *(cachepage + 1) = fileid; }
 void set_offset(uint64_t* cachepage, uint64_t offset){ *(cachepage + 2) = offset; }
-void set_cacheframe(uint64_t* cachepage, uint64_t* cacheframe){ *(cachepage + 3) = (uint64_t) cacheframe; }
+void set_cacheframe(uint64_t* cachepage, uint64_t cacheframe){ *(cachepage + 3) = cacheframe; }
 
 uint64_t* allocate_cachepage(){
   // Se reserva el espacio ocupado por un cache page node
@@ -7949,7 +7958,7 @@ uint64_t* new_cachepage(){
 
 }
 
-uint64_t* build_cachepage(uint64_t fileid, uint64_t offset, uint64_t* cacheframe){
+uint64_t* build_cachepage(uint64_t fileid, uint64_t offset, uint64_t cacheframe){
   
   uint64_t* cachepage = new_cachepage();
  
@@ -8041,6 +8050,151 @@ uint64_t find_or_create_fileid(char* filename){
   return get_global_fileid(state);
 }
 
+// ----------------------------------------------------------------
+// --------------------------- mapping ----------------------------
+// ----------------------------------------------------------------
+
+uint64_t* get_mapping_i(uint64_t* context, uint64_t i){ return get_mappings(context) + i * MAPPINGFIELDS; }
+uint64_t get_mapping_addr(uint64_t* mapping){ return *mapping; }
+uint64_t get_mapping_length(uint64_t* mapping){ return *(mapping + 1); }
+uint64_t get_mapping_prot(uint64_t* mapping){ return *(mapping + 2); }
+uint64_t get_mapping_fileid(uint64_t* mapping){ return *(mapping + 3);}
+uint64_t get_mapping_offset(uint64_t* mapping){ return *(mapping + 4); }
+
+void set_mapping_addr(uint64_t* mapping, uint64_t addr){ *mapping = addr; }
+void set_mapping_length(uint64_t* mapping, uint64_t length){ *(mapping + 1) = length; }
+void set_mapping_prot(uint64_t* mapping, uint64_t prot){ *(mapping + 2) = prot; }
+void set_mapping_fileid(uint64_t* mapping, uint64_t fileid){ *(mapping + 3) = fileid;}
+void set_mapping_offset(uint64_t* mapping, uint64_t offset){ *(mapping + 4) = offset; }
+
+void emit_mmap(){
+    create_symbol_table_entry(GLOBAL_TABLE, string_copy("mmap"),
+    0, PROCEDURE, UINT64_T, 5, code_size);
+
+  emit_load(REG_A0, REG_SP, 0); // addr
+  emit_addi(REG_SP, REG_SP, WORDSIZE);
+
+  emit_load(REG_A1, REG_SP, 0); // length
+  emit_addi(REG_SP, REG_SP, WORDSIZE);
+
+  emit_load(REG_A2, REG_SP, 0); // prot
+  emit_addi(REG_SP, REG_SP, WORDSIZE);
+
+  emit_load(REG_A3, REG_SP, 0); // fd
+  emit_addi(REG_SP, REG_SP, WORDSIZE);
+
+  emit_load(REG_A4, REG_SP, 0); // offset
+  emit_addi(REG_SP, REG_SP, WORDSIZE);
+
+  emit_addi(REG_A7, REG_ZR, SYSCALL_MMAP);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+}
+
+void set_mapping_context(uint64_t* context, uint64_t mmapidx, uint64_t addr, uint64_t length, uint64_t prot,
+  uint64_t fileid, uint64_t offset){
+
+    uint64_t* mapping;
+    mapping = get_mapping_i(context, mmapidx);
+    set_mapping_addr(mapping, addr);
+    set_mapping_length(mapping, length);
+    set_mapping_prot(mapping, prot);
+    set_mapping_fileid(mapping, fileid);
+    set_mapping_offset(mapping, offset);
+
+  }
+
+void implement_mmap(uint64_t* context){
+
+  // registros
+  uint64_t addr;
+  uint64_t length;
+  uint64_t prot;
+  uint64_t fd;
+  uint64_t initial_offset;
+
+  // variables
+  uint64_t fileid;
+  uint64_t* cachepage;
+  uint64_t* cacheframe;
+  
+  uint64_t offset;
+
+  uint64_t initial_page;
+  uint64_t page;
+
+  uint64_t n_pages;
+  uint64_t i;
+
+  if (debug_syscalls){
+    printf("(mmap): ");
+    // acá colocame los print registers
+  }
+
+  // rescatar valores de los regs
+  addr = *(get_regs(context) + REG_A0);
+  length = *(get_regs(context) + REG_A1);
+  prot = *(get_regs(context) + REG_A2);
+  fd = *(get_regs(context) + REG_A3);
+  initial_offset = *(get_regs(context) + REG_A4);
+
+  // get fileid global
+  fileid = *(get_fileids(context) + fd);
+  
+  // page inicial
+  initial_page = get_page_of_virtual_address(addr);
+
+  // Si el archivo es grande puede tener más de 1 cacheframe mapeado.
+  n_pages = round_up(length, PAGESIZE) / PAGESIZE;
+  i = 0;
+
+  while(i < n_pages){
+
+    // se avanza al siguiente page.
+    offset = initial_offset + i * PAGESIZE;
+
+    cachepage = find_cachepage(fileid, offset);
+    page = initial_page + i;
+
+    if(cachepage == (uint64_t*) 0){
+
+      // se crea el espacio en mem fisica, como buffer
+      cacheframe = palloc();
+
+      // se rellena el buffer
+      read(fd, cacheframe, PAGESIZE);
+    
+      // se crea la instancia en el cachepage como direccion
+      build_cachepage(fileid, offset, (uint64_t) cacheframe);
+    }
+
+
+    else{
+      // rescato el cacheframe del cachepage
+      cacheframe = (uint64_t*) get_cacheframe(cachepage);
+    }
+
+    // se mapea la page al cacheframe en el TLB / PTE
+    map_page(context, page, (uint64_t) cacheframe);
+    
+    i = i+1;
+  }
+
+  // se guarda el mapeo en el contexto del proceso
+  set_mapping_context(context, get_mmap_count(context), addr, length, prot, fileid, initial_offset);
+
+  // aumentamos localmente el numero de mmaps anclados a un proceso
+  set_mmap_count(context, get_mmap_count(context) + 1);
+
+  // retorno
+  *(get_regs(context) + REG_A0) = addr;
+
+  // avanzar posi
+  set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
+
+}
 
 void implement_openat(uint64_t* context) {
   // parameters
@@ -11365,8 +11519,10 @@ void init_context(uint64_t* context, uint64_t* parent, uint64_t* vctxt) {
   set_status(context, STATUS_READY);
   set_nchildren(context, 0);
 
-  set_mappings(context, (uint64_t*) 0);  
+  // Numero de mapping fijos en el proceso
+  set_mappings(context, zmalloc(MAXMAPPINGS * MAPPINGFIELDS * sizeof(uint64_t))); 
   set_fileids(context, zmalloc(MAXFILEIDS * sizeof(uint64_t)));
+  set_mmap_count(context, 0);
 
 }
 
@@ -11987,6 +12143,8 @@ uint64_t handle_system_call(uint64_t* context) {
     implement_fork(context);
   else if (a7 == SYSCALL_WAIT)
     implement_wait(context);
+  else if (a7 == SYSCALL_MMAP)
+    implement_mmap(context);
   else if (a7 == SYSCALL_EXIT) {
     implement_exit(context);
 
