@@ -1280,6 +1280,9 @@ void implement_write(uint64_t* context);
 void emit_mmap();
 void implement_mmap(uint64_t* context);
 
+void emit_munmap();
+void implement_munmap(uint64_t* context);
+
 void     emit_open();
 uint64_t down_load_string(uint64_t* context, uint64_t vstring, char* s);
 void     implement_openat(uint64_t* context);
@@ -1319,6 +1322,7 @@ uint64_t SYSCALL_WAIT	= 216;
 uint64_t DIRFD_AT_FDCWD = -100;
 
 uint64_t SYSCALL_MMAP = 997;
+uint64_t SYSCALL_MUNMAP = 998;
 
 // ------------------------ GLOBAL VARIABLES -----------------------
 
@@ -6394,6 +6398,7 @@ void selfie_compile() {
   emit_wait();
   emit_open();
   emit_mmap();
+  emit_munmap();
 
   emit_malloc();
 
@@ -8071,8 +8076,8 @@ void set_mapping_fileid(uint64_t* mapping, uint64_t fileid){ *(mapping + 3) = fi
 void set_mapping_offset(uint64_t* mapping, uint64_t offset){ *(mapping + 4) = offset; }
 
 void emit_mmap(){
-    create_symbol_table_entry(GLOBAL_TABLE, string_copy("mmap"),
-    0, PROCEDURE, UINT64_T, 5, code_size);
+  create_symbol_table_entry(GLOBAL_TABLE, string_copy("mmap"),
+  0, PROCEDURE, UINT64_T, 5, code_size);
 
   emit_load(REG_A0, REG_SP, 0); // addr
   emit_addi(REG_SP, REG_SP, WORDSIZE);
@@ -8206,10 +8211,105 @@ void implement_mmap(uint64_t* context){
   // retorno
   *(get_regs(context) + REG_A0) = addr;
 
-  printf("MMAP llamado: addr=%lu length=%lu prot=%lu fd=%lu offset=%lu\n",
+  printf("MMAP llamado: addr=%lu length=%lu prot=%lu fileid=%lu offset=%lu\n",
     addr, length, prot, fd, initial_offset);
 
   // avanzar posi
+  set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
+
+}
+
+void emit_munmap(){
+  create_symbol_table_entry(GLOBAL_TABLE, string_copy("munmap"),
+  0, PROCEDURE, UINT64_T, 1, code_size);
+
+  emit_load(REG_A0, REG_SP, 0); // addr
+  emit_addi(REG_SP, REG_SP, WORDSIZE);
+
+  emit_addi(REG_A7, REG_ZR, SYSCALL_MUNMAP);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+}
+
+uint64_t* find_addr_in_mappings(uint64_t* context, uint64_t addr){
+
+  uint64_t i;
+  uint64_t* mapping;
+
+  i=0;
+
+  // es un array de tam fijo.
+  while(i < get_mmap_count(context)){
+    mapping = get_mapping_i(context, i);
+    
+    // Para no mapear mappings borrados con munmap anteriormente.
+    if(get_mapping_addr(mapping) != 0)
+      // Si es el mismo addr contenido en el mapping gg.
+      if(get_mapping_addr(mapping) == addr) return mapping;
+    i = i + 1;
+  }
+
+  return (uint64_t*) 0;
+}
+
+void implement_munmap(uint64_t* context){
+
+  // parameters
+  uint64_t context_addr;
+
+  // variables
+  uint64_t* mapping;
+  uint64_t mapping_length;
+
+  // iters
+  uint64_t i;
+
+  // page
+  uint64_t initial_page;
+  uint64_t page;
+  uint64_t n_pages;
+
+  if (debug_syscalls){
+    printf("(munmap): ");
+    print_register_value(REG_A0);   // addr
+    println();
+  }
+
+  context_addr = *(get_regs(context) + REG_A0);
+
+  // Entre todos los linkeados del proceso, buscamos el que encaje con el addr.
+  mapping = find_addr_in_mappings(context, context_addr);
+
+  // si lo encontro ...
+  if(mapping != (uint64_t*) 0){
+    mapping_length = get_mapping_length(mapping);
+
+    i = 0;
+    initial_page = get_page_of_virtual_address(context_addr);
+    n_pages = round_up(mapping_length, PAGESIZE) / PAGESIZE;
+
+    while(i < n_pages){
+
+      page = initial_page + i;
+
+      // se borra el mapeo en el PTE
+      set_PTE_for_page(get_pt(context), page, 0);
+
+      i = i+1;
+    }
+
+    // en el mapeo del proceso, se borra esta dirección...
+    set_mapping_addr(mapping, 0);
+
+    *(get_regs(context) + REG_A0) = context_addr;
+  }
+
+  // no lo encontró.
+  // sign_shrink para asignar -1 al return en un uint64_t, like openat.
+  else *(get_regs(context) + REG_A0) = sign_shrink(-1, SYSCALL_BITWIDTH);
+
   set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
 
 }
@@ -10173,9 +10273,10 @@ uint64_t is_mmap_address(uint64_t* context, uint64_t vaddr) {
     length  = get_mapping_length(mapping);
 
     // el vaddr cae en [addr, addr + length)
-    if (vaddr >= addr)
-      if (vaddr < addr + length)
-        return 1;
+    if(addr != 0)
+      if (vaddr >= addr)
+        if (vaddr < addr + length)
+          return 1;
 
     i = i + 1;
   }
@@ -12191,6 +12292,8 @@ uint64_t handle_system_call(uint64_t* context) {
     implement_wait(context);
   else if (a7 == SYSCALL_MMAP)
     implement_mmap(context);
+  else if (a7 == SYSCALL_MUNMAP)
+    implement_munmap(context);
   else if (a7 == SYSCALL_EXIT) {
     implement_exit(context);
 
