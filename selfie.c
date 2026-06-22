@@ -11590,14 +11590,20 @@ uint64_t is_valid_segment_write(uint64_t vaddr) {
 // ---------------------------- Proyecto OS ------------------------
 // -----------------------------------------------------------------
 
+
+// -----------------------------------------------------------------
+// -------------------------- Cache Page ---------------------------
+// -----------------------------------------------------------------
+
 uint64_t CachePageEntries = 4;
 uint64_t* used_cachepage = (uint64_t*) 0;
 
-// ------------------------- Machine CachePage ---------------------
+// ------------------------- Machine Cache Page ---------------------
 // 0 <- next_cachepage_row
 // 1 <- file id
 // 2 <- offset
 // 3 <- cache frame address
+// ------------------------------------------------------------------
 
 uint64_t* get_next_cachepage(uint64_t* cachepage){ return (uint64_t*) *cachepage; }
 uint64_t get_fileid(uint64_t* cachepage){ return *(cachepage + 1); }
@@ -11665,11 +11671,64 @@ uint64_t* find_cachepage(uint64_t fileid, uint64_t offset){
 
 }
 
+// ----------------------------------------------------------------
+// ------------------ mapping global file id ----------------------
+// ----------------------------------------------------------------
+
+uint64_t global_accumulator = 0;
+uint64_t fileid_entries = 3;
+uint64_t* used_node_fileid = (uint64_t*) 0;
+
+uint64_t* get_next_fileid(uint64_t* node_fileid){ return (uint64_t*) *node_fileid; }
+char* get_name_fileid(uint64_t* node_fileid){ return (char*) *(node_fileid + 1); }
+uint64_t get_global_fileid(uint64_t* node_fileid){ return *(node_fileid + 2); }
+
+void set_next_fileid(uint64_t* node_fileid, uint64_t* next_node_fileid){ *node_fileid = (uint64_t) next_node_fileid; }
+void set_name_fileid(uint64_t* node_fileid, char* name_fileid){ *(node_fileid + 1) = (uint64_t) name_fileid; }
+void set_global_fileid(uint64_t* node_fileid, uint64_t global_fileid){ *(node_fileid + 2) = global_fileid; }
+
+uint64_t* allocate_node_fileid(){
+  // Se reserva el espacio ocupado por un cache page node
+  return smalloc(fileid_entries * sizeof(uint64_t));
+}
 
 
+// funciona como un push forward
+uint64_t* new_node_fileid(){
+  uint64_t* node_fileid;
 
+  node_fileid = allocate_node_fileid();
+  set_next_fileid(node_fileid, used_node_fileid);
+  used_node_fileid = node_fileid;
 
+  return node_fileid;
+}
 
+uint64_t* build_node_fileid(char* filename){
+  
+  uint64_t* node_fileid = new_node_fileid();
+
+  set_name_fileid(node_fileid, string_copy(filename));
+  set_global_fileid(node_fileid, global_accumulator);
+
+  global_accumulator = global_accumulator + 1;
+
+  return node_fileid;
+}
+
+uint64_t find_or_create_fileid(char* filename){
+
+  uint64_t* state = used_node_fileid;
+
+  while(state != (uint64_t*) 0){
+    if( string_compare(filename, get_name_fileid(state)) ){ return get_global_fileid(state); }
+    state = get_next_fileid(state);
+  }
+  
+  // si no lo encuentra, lo crea!
+  state = build_node_fileid(filename);
+  return get_global_fileid(state);
+}
 
 // -----------------------------------------------------------------
 // ---------------------------- KERNEL -----------------------------
