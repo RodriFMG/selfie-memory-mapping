@@ -1262,6 +1262,7 @@ void reset_binary_counters() {
   dc_big_integer     = 0;
 }
 
+
 // -----------------------------------------------------------------
 // ----------------------- MIPSTER SYSCALLS ------------------------
 // -----------------------------------------------------------------
@@ -1388,6 +1389,25 @@ void set_cache_timer(uint64_t* cache, uint64_t cache_timer)           { *(cache 
 uint64_t* allocate_cache_block() {
   return zmalloc(1 * sizeof(uint64_t*) + 3 * sizeof(uint64_t));
 }
+
+// page cache entry
+// 0 <- file id
+// 1 <- file offset
+// 2 <- cache frame
+
+uint64_t* allocate_page_cache(){
+  return zmalloc(1 * sizeof(uint64_t*) + 2 * sizeof(uint64_t));
+}
+
+// mapping entry
+// 0 <- addrs
+// 1 <- offset
+// 2 <- lengths
+// 3 <- file id
+uint64_t* allocate_mapping(){
+  return zmalloc(1 * sizeof(uint64_t*) + 3 * sizeof(uint64_t));
+}
+
 
 uint64_t  get_valid_flag(uint64_t* cache_block)   { return             *cache_block; }
 uint64_t  get_tag(uint64_t* cache_block)          { return             *(cache_block + 1); }
@@ -2230,7 +2250,7 @@ void unblock_context(uint64_t* context);
 // number of entries of a machine context:
 // 14 uint64_t + 6 uint64_t* + 1 char* + 7 uint64_t + 2 uint64_t* + 2 uint64_t entries
 // extended in the symbolic execution engine and the Boehm garbage collector
-uint64_t CONTEXTENTRIES = 38;
+uint64_t CONTEXTENTRIES = 39;
 uint64_t N_CONTEXTS = 0;
 uint64_t* RUNNING = (uint64_t*) 0;
 uint64_t N_BLOCKED_CONTEXTS = 0;
@@ -2247,6 +2267,8 @@ uint64_t* allocate_context() {
   // assert: sizeof(uint64_t) == sizeof(uint64_t*)
   return smalloc(CONTEXTENTRIES * sizeof(uint64_t));
 }
+
+
 
 uint64_t next_context(uint64_t* context)    { return (uint64_t) context; }
 uint64_t prev_context(uint64_t* context)    { return (uint64_t) (context + 1); }
@@ -2370,6 +2392,12 @@ void set_status(uint64_t* context, uint64_t status) { *(context + 34) = status; 
 void set_nchildren(uint64_t* context, uint64_t nchildren) { *(context + 35) = nchildren; }
 void set_child_exit_code(uint64_t* context, uint64_t exit_code) { *(context + 36) = exit_code; }
 void set_child_pid(uint64_t* context, uint64_t child_pid) { *(context + 37) = child_pid; }
+
+
+// mapping get / set
+uint64_t* get_mappings(uint64_t* context){ return (uint64_t*) *(context + 38); }
+void set_mappings(uint64_t* context, uint64_t* mmap){ *(context + 38) = (uint64_t) mmap; }
+
 
 // -----------------------------------------------------------------
 // -------------------------- MICROKERNEL --------------------------
@@ -11165,6 +11193,10 @@ void init_context(uint64_t* context, uint64_t* parent, uint64_t* vctxt) {
 
   set_status(context, STATUS_READY);
   set_nchildren(context, 0);
+
+  // mapping vacio
+  set_mappings(context, (uint64_t*) 0);
+
 }
 
 uint64_t* find_context(uint64_t* parent, uint64_t* vctxt) {
@@ -11553,6 +11585,91 @@ uint64_t is_valid_segment_write(uint64_t vaddr) {
   } else
     return 0;
 }
+
+// -----------------------------------------------------------------
+// ---------------------------- Proyecto OS ------------------------
+// -----------------------------------------------------------------
+
+uint64_t CachePageEntries = 4;
+uint64_t* used_cachepage = (uint64_t*) 0;
+
+// ------------------------- Machine CachePage ---------------------
+// 0 <- next_cachepage_row
+// 1 <- file id
+// 2 <- offset
+// 3 <- cache frame address
+
+uint64_t* get_next_cachepage(uint64_t* cachepage){ return (uint64_t*) *cachepage; }
+uint64_t get_fileid(uint64_t* cachepage){ return *(cachepage + 1); }
+uint64_t get_offset(uint64_t* cachepage){ return *(cachepage + 2); }
+uint64_t* get_cacheframe(uint64_t* cachepage){ return (uint64_t*) *(cachepage + 3); }
+
+void set_next_cachepage(uint64_t* cachepage, uint64_t* next_cachepage){ *cachepage = (uint64_t) next_cachepage; }
+void set_fileid(uint64_t* cachepage, uint64_t fileid){ *(cachepage + 1) = fileid; }
+void set_offset(uint64_t* cachepage, uint64_t offset){ *(cachepage + 2) = offset; }
+void set_cacheframe(uint64_t* cachepage, uint64_t* cacheframe){ *(cachepage + 3) = (uint64_t) cacheframe; }
+
+uint64_t* allocate_cachepage(){
+  // Se reserva el espacio ocupado por un cache page node
+  return smalloc(CachePageEntries * sizeof(uint64_t));
+}
+
+
+// funciona como un push forward
+uint64_t* new_cachepage(){
+  uint64_t* cachepage;
+  cachepage = allocate_cachepage();
+
+  /* Si se quiere des mapear, acá habría que manear un free_cachepage, como en context, por el momento sería asi */
+
+  // la posicion siguiente sea el anterior primer cachepage
+  set_next_cachepage(cachepage, used_cachepage);
+
+  // apuntamos al primer cachepage
+  used_cachepage = cachepage;
+
+  return cachepage;
+
+}
+
+uint64_t* build_cachepage(uint64_t fileid, uint64_t offset, uint64_t* cacheframe){
+  
+  uint64_t* cachepage = new_cachepage();
+ 
+  // si se agrega un campo más, se coloca acá.
+  set_fileid(cachepage, fileid);
+  set_offset(cachepage, offset);
+  set_cacheframe(cachepage, cacheframe);
+
+  return cachepage;
+}
+
+uint64_t* find_cachepage(uint64_t fileid, uint64_t offset){
+
+  uint64_t* state = used_cachepage;
+
+  while(state != (uint64_t*) 0){
+
+    if(get_fileid(state) == fileid){
+
+      // Encontro el cache page!, devuelve el nodo entero.
+      if(get_offset(state) == offset) return state;
+    }
+
+    state = get_next_cachepage(state);
+  }
+
+
+  // no lo encontró!
+  return (uint64_t*) 0;
+
+}
+
+
+
+
+
+
 
 // -----------------------------------------------------------------
 // ---------------------------- KERNEL -----------------------------
