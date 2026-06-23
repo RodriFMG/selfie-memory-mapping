@@ -262,6 +262,7 @@ uint64_t STDOUT_FD = 1; // standard output has file descriptor 1
 // since LINUX/MAC do not seem to mind about _O_BINARY set
 // we use the WINDOWS flags as default
 uint64_t O_RDONLY = 32768;
+uint64_t O_RDWR = 2;
 
 // flags for opening write-only files
 // LINUX: 577 = 0x0241 = O_CREAT (0x0040) | O_TRUNC (0x0200) | O_WRONLY (0x0001)
@@ -8186,6 +8187,9 @@ void implement_mmap(uint64_t* context){
       // se crea el espacio en mem fisica, como buffer
       cacheframe = palloc();
 
+      // posicionando el cursos en el offset
+      lseek(fd, offset, 0);
+
       // se rellena el buffer
       read(fd, cacheframe, PAGESIZE);
 
@@ -8238,6 +8242,8 @@ void emit_munmap(){
 
   emit_jalr(REG_ZR, REG_RA, 0);
 }
+
+uint64_t lseek(uint64_t fd, uint64_t offset, uint64_t whence);
 
 uint64_t* find_addr_in_mappings(uint64_t* context, uint64_t addr){
 
@@ -8372,35 +8378,41 @@ void implement_msync(uint64_t* context){
 
   // si lo encontro ...
   if(mapping != (uint64_t*) 0){
-    mapping_length = get_mapping_length(mapping);
-    mapping_fd = get_mapping_fd(mapping);
-    mapping_fileid = *(get_fileids(context) + mapping_fd);
-    mapping_offset = get_mapping_offset(mapping);
+    if(get_mapping_prot(mapping) != 0){
+      mapping_length = get_mapping_length(mapping);
+      mapping_fd = get_mapping_fd(mapping);
+      mapping_fileid = *(get_fileids(context) + mapping_fd);
+      mapping_offset = get_mapping_offset(mapping);
 
-    i = 0;
-    n_pages = round_up(mapping_length, PAGESIZE) / PAGESIZE;
+      i = 0;
+      n_pages = round_up(mapping_length, PAGESIZE) / PAGESIZE;
 
-    while(i < n_pages){
+      while(i < n_pages){
 
-      // saltando al offset actual
-      actual_offset = mapping_offset + i * PAGESIZE;
+        // saltando al offset actual
+        actual_offset = mapping_offset + i * PAGESIZE;
 
-      // buscando directamente los cache frames por el cache page
-      cachepage = find_cachepage(mapping_fileid, actual_offset);
+        // buscando directamente los cache frames por el cache page
+        cachepage = find_cachepage(mapping_fileid, actual_offset);
 
-      // no se consideran los cachepage no mapeados
-      if(cachepage != (uint64_t*) 0){
-        cacheframe = (uint64_t*) get_cacheframe(cachepage);
-        write(mapping_fd, cacheframe, PAGESIZE);
+        // no se consideran los cachepage no mapeados
+        if(cachepage != (uint64_t*) 0){
+          cacheframe = (uint64_t*) get_cacheframe(cachepage);
+          lseek(mapping_fd, actual_offset, 0);
+          write(mapping_fd, cacheframe, PAGESIZE);
+        }
+
+        i = i+1;
       }
 
-      i = i+1;
+      *(get_regs(context) + REG_A0) = context_addr;
     }
 
-    *(get_regs(context) + REG_A0) = context_addr;
+    // existe el mapping pero es read only
+    else *(get_regs(context) + REG_A0) = sign_shrink(-1, SYSCALL_BITWIDTH);
   }
 
-  // no lo encontró.
+  // no existe el mapping
   else *(get_regs(context) + REG_A0) = sign_shrink(-1, SYSCALL_BITWIDTH);
 
   set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
@@ -12103,6 +12115,29 @@ uint64_t is_heap_address(uint64_t* context, uint64_t vaddr) {
   return 0;
 }
 
+uint64_t get_prot_of_mmap_address(uint64_t* context, uint64_t vaddr) {
+  uint64_t i;
+  uint64_t* mapping;
+  uint64_t addr;
+  uint64_t length;
+
+  i = 0;
+  while (i < get_mmap_count(context)) {
+    mapping = get_mapping_i(context, i);
+    addr   = get_mapping_addr(mapping);
+    length = get_mapping_length(mapping);
+
+    if (addr != 0)
+      if (vaddr >= addr)
+        if (vaddr < addr + length)
+          return get_mapping_prot(mapping);
+
+    i = i + 1;
+  }
+
+  return 0;
+}
+
 uint64_t is_address_between_stack_and_heap(uint64_t* context, uint64_t vaddr) {
   // is address between heap and stack segments?
   if (vaddr >= get_program_break(context))
@@ -12137,7 +12172,10 @@ uint64_t is_valid_segment_read(uint64_t vaddr) {
 
     return 1;
   } else if(is_mmap_address(current_context, vaddr)) {
-    return 1;
+    if(get_prot_of_mmap_address(current_context, vaddr) != 1)
+      return 1;
+    else
+      return 0;
   } else
     return 0;
 }
@@ -12157,7 +12195,10 @@ uint64_t is_valid_segment_write(uint64_t vaddr) {
     return 1;
   }
    else if(is_mmap_address(current_context, vaddr)){
-    return 1;
+    if(get_prot_of_mmap_address(current_context, vaddr) != 0)
+      return 1;
+    else
+      return 0;
    } else
     return 0;
 }
