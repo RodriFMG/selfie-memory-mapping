@@ -8181,9 +8181,9 @@ void implement_mmap(uint64_t* context){
 
     // se avanza al siguiente page.
     offset = initial_offset + i * PAGESIZE;
+    page = initial_page + i;
 
     cachepage = find_cachepage(fileid, offset);
-    page = initial_page + i;
 
     if(cachepage == (uint64_t*) 0){
 
@@ -8632,10 +8632,35 @@ void emit_fork() {
 }
 
 void implement_fork(uint64_t* context) {
-	uint64_t* child;
+	
+  // profe variables
+  uint64_t* child;
 	uint64_t i;
 	uint64_t page;
 	uint64_t vaddr;
+
+    // parent
+  uint64_t* parent_mapping_i;
+
+  // actualziar el PTE del child para los mapeos
+  uint64_t* mapping_i;
+  uint64_t mapping_length_i;
+  uint64_t mapping_addr_i;
+  uint64_t mapping_offset_i;
+  uint64_t mapping_fd_i;
+  uint64_t mapping_fileid_i;
+
+  // cachepage
+  uint64_t* cachepage;
+  uint64_t cacheframe;
+
+  // pages
+  uint64_t initial_page;
+  uint64_t n_pages;
+
+  // others
+  uint64_t j;
+  uint64_t actual_offset;
 	
 	child = create_context (MY_CONTEXT, 0);
 	
@@ -8693,6 +8718,66 @@ void implement_fork(uint64_t* context) {
 	set_ec_timer(child, get_ec_timer(context));
 	set_mc_stack_peak(child, get_mc_stack_peak(context));
 	set_mc_mapped_heap(child, get_mc_mapped_heap(context));
+
+  // heredar mappings
+  set_mmap_count(child, get_mmap_count(context));
+  
+  i=0;
+
+  // para crear un nuevo array de los mapping para el hijo y no solo copiar puntero del padre al fijo.
+  while (i < get_mmap_count(child)){
+    parent_mapping_i = get_mapping_i(context, i);
+    set_mapping_context(child, i, 
+      get_mapping_addr(parent_mapping_i),
+      get_mapping_length(parent_mapping_i),
+      get_mapping_prot(parent_mapping_i),
+      get_mapping_fd(parent_mapping_i),
+      get_mapping_offset(parent_mapping_i)
+    );
+
+    i = i+1;
+  }
+
+  i=0;
+
+  // para copiar los fileids globales del parent al hijo.
+  while( i < MAXFILEIDS){
+    *(get_fileids(child) + i) = *(get_fileids(context) + i);
+    i = i+1;
+  }
+
+  i=0;
+
+  // mapeos en la PTE de los page -> cacheframes, del child
+  while(i < get_mmap_count(child)){
+    j=0;
+
+    mapping_i = get_mapping_i(child, i);
+    mapping_length_i = get_mapping_length(mapping_i);
+    mapping_addr_i = get_mapping_addr(mapping_i);
+    mapping_offset_i = get_mapping_offset(mapping_i);
+    mapping_fd_i = get_mapping_fd(mapping_i);
+    mapping_fileid_i = *(get_fileids(child) + mapping_fd_i);
+
+    initial_page = get_page_of_virtual_address(mapping_addr_i);
+    n_pages = round_up(mapping_length_i, PAGESIZE) / PAGESIZE;
+
+    while(j < n_pages){
+      
+      actual_offset = mapping_offset_i + j * PAGESIZE; 
+      page = initial_page + j;
+      cachepage = find_cachepage(mapping_fileid_i, actual_offset);
+
+      if(cachepage != (uint64_t*) 0){
+        cacheframe = get_cacheframe(cachepage);
+        map_page(child, page, cacheframe);
+      }
+      
+      j = j+1;
+    }
+
+    i = i+1;
+  }
 
 	set_nchildren(context, get_nchildren(context) + 1);
 
