@@ -8024,6 +8024,8 @@ void set_next_fileid(uint64_t* node_fileid, uint64_t* next_node_fileid){ *node_f
 void set_name_fileid(uint64_t* node_fileid, char* name_fileid){ *(node_fileid + 1) = (uint64_t) name_fileid; }
 void set_global_fileid(uint64_t* node_fileid, uint64_t global_fileid){ *(node_fileid + 2) = global_fileid; }
 
+uint64_t is_mmap_address(uint64_t* context, uint64_t vaddr);
+
 uint64_t* allocate_node_fileid(){
   // Se reserva el espacio ocupado por un cache page node
   return smalloc(fileid_entries * sizeof(uint64_t));
@@ -8210,7 +8212,7 @@ void implement_mmap(uint64_t* context){
     }
 
     // se mapea la page al cacheframe en el TLB / PTE
-    map_page(context, page, (uint64_t) cacheframe);
+    set_PTE_for_page(get_pt(context), page, (uint64_t) cacheframe);
     
     i = i+1;
   }
@@ -8662,6 +8664,10 @@ void implement_fork(uint64_t* context) {
   uint64_t j;
   uint64_t actual_offset;
 	
+  if (debug_syscalls) 
+    printf("(fork): sin params\n");
+  
+
 	child = create_context (MY_CONTEXT, 0);
 	
 	/* Set current context pid as parent pid */
@@ -8690,11 +8696,11 @@ void implement_fork(uint64_t* context) {
 
 	/* Copy high pages */
 	page = get_lowest_hi_page(context);
-	vaddr = page * PAGESIZE;
-	while (get_page_of_virtual_address(vaddr) < get_highest_hi_page(context)) {
-		map_and_store (child, vaddr, load_virtual_memory(get_pt(context), vaddr));
-		vaddr = vaddr + WORDSIZE;
-	}
+  vaddr = page * PAGESIZE;
+  while (get_page_of_virtual_address(vaddr) < get_highest_hi_page(context)) {
+      map_and_store(child, vaddr, load_virtual_memory(get_pt(context), vaddr));
+      vaddr = vaddr + WORDSIZE;
+  }
 	
 	/* Copy page bounds */
 	set_lowest_lo_page(child, get_lowest_lo_page(context));
@@ -8719,9 +8725,14 @@ void implement_fork(uint64_t* context) {
 	set_mc_stack_peak(child, get_mc_stack_peak(context));
 	set_mc_mapped_heap(child, get_mc_mapped_heap(context));
 
+  printf("(fork): wiiiiii\n");
+  
+  printf("FORK: child mappings = %lu, fileids = %lu, count_padre = %lu\n",
+    (uint64_t) get_mappings(child), (uint64_t) get_fileids(child), get_mmap_count(context));
+
   // heredar mappings
   set_mmap_count(child, get_mmap_count(context));
-  
+
   i=0;
 
   // para crear un nuevo array de los mapping para el hijo y no solo copiar puntero del padre al fijo.
@@ -8770,9 +8781,9 @@ void implement_fork(uint64_t* context) {
 
       if(cachepage != (uint64_t*) 0){
         cacheframe = get_cacheframe(cachepage);
-        map_page(child, page, cacheframe);
+        set_PTE_for_page(get_pt(child), page, (uint64_t) cacheframe);
       }
-      
+
       j = j+1;
     }
 
