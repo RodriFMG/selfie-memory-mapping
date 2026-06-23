@@ -1268,6 +1268,9 @@ void reset_binary_counters() {
 // ----------------------- MIPSTER SYSCALLS ------------------------
 // -----------------------------------------------------------------
 
+// para el posicionamiento correcto del cursor para read/write.
+uint64_t lseek(uint64_t fd, uint64_t offset, uint64_t whence);
+
 void emit_exit();
 void implement_exit(uint64_t* context);
 
@@ -8243,8 +8246,6 @@ void emit_munmap(){
   emit_jalr(REG_ZR, REG_RA, 0);
 }
 
-uint64_t lseek(uint64_t fd, uint64_t offset, uint64_t whence);
-
 uint64_t* find_addr_in_mappings(uint64_t* context, uint64_t addr){
 
   uint64_t i;
@@ -12437,6 +12438,8 @@ uint64_t handle_system_call(uint64_t* context) {
     implement_mmap(context);
   else if (a7 == SYSCALL_MUNMAP)
     implement_munmap(context);
+  else if(a7 == SYSCALL_MSYNC)
+    implement_msync(context);
   else if (a7 == SYSCALL_EXIT) {
     implement_exit(context);
 
