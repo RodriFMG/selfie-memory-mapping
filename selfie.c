@@ -1283,6 +1283,9 @@ void implement_mmap(uint64_t* context);
 void emit_munmap();
 void implement_munmap(uint64_t* context);
 
+void emit_msync();
+void implement_msync(uint64_t* context);
+
 void     emit_open();
 uint64_t down_load_string(uint64_t* context, uint64_t vstring, char* s);
 void     implement_openat(uint64_t* context);
@@ -1323,6 +1326,7 @@ uint64_t DIRFD_AT_FDCWD = -100;
 
 uint64_t SYSCALL_MMAP = 997;
 uint64_t SYSCALL_MUNMAP = 998;
+uint64_t SYSCALL_MSYNC = 999;
 
 // ------------------------ GLOBAL VARIABLES -----------------------
 
@@ -6399,6 +6403,7 @@ void selfie_compile() {
   emit_open();
   emit_mmap();
   emit_munmap();
+  emit_msync();
 
   emit_malloc();
 
@@ -8066,13 +8071,13 @@ uint64_t* get_mapping_i(uint64_t* context, uint64_t i){ return get_mappings(cont
 uint64_t get_mapping_addr(uint64_t* mapping){ return *mapping; }
 uint64_t get_mapping_length(uint64_t* mapping){ return *(mapping + 1); }
 uint64_t get_mapping_prot(uint64_t* mapping){ return *(mapping + 2); }
-uint64_t get_mapping_fileid(uint64_t* mapping){ return *(mapping + 3);}
+uint64_t get_mapping_fd(uint64_t* mapping){ return *(mapping + 3);}
 uint64_t get_mapping_offset(uint64_t* mapping){ return *(mapping + 4); }
 
 void set_mapping_addr(uint64_t* mapping, uint64_t addr){ *mapping = addr; }
 void set_mapping_length(uint64_t* mapping, uint64_t length){ *(mapping + 1) = length; }
 void set_mapping_prot(uint64_t* mapping, uint64_t prot){ *(mapping + 2) = prot; }
-void set_mapping_fileid(uint64_t* mapping, uint64_t fileid){ *(mapping + 3) = fileid;}
+void set_mapping_fd(uint64_t* mapping, uint64_t fd){ *(mapping + 3) = fd;}
 void set_mapping_offset(uint64_t* mapping, uint64_t offset){ *(mapping + 4) = offset; }
 
 void emit_mmap(){
@@ -8102,14 +8107,14 @@ void emit_mmap(){
 }
 
 void set_mapping_context(uint64_t* context, uint64_t mmapidx, uint64_t addr, uint64_t length, uint64_t prot,
-  uint64_t fileid, uint64_t offset){
+  uint64_t fd, uint64_t offset){
 
     uint64_t* mapping;
     mapping = get_mapping_i(context, mmapidx);
     set_mapping_addr(mapping, addr);
     set_mapping_length(mapping, length);
     set_mapping_prot(mapping, prot);
-    set_mapping_fileid(mapping, fileid);
+    set_mapping_fd(mapping, fd);
     set_mapping_offset(mapping, offset);
 
   }
@@ -8167,6 +8172,7 @@ void implement_mmap(uint64_t* context){
   n_pages = round_up(length, PAGESIZE) / PAGESIZE;
   i = 0;
 
+  // recorriendo el rango de mapping addrs
   while(i < n_pages){
 
     // se avanza al siguiente page.
@@ -8203,7 +8209,7 @@ void implement_mmap(uint64_t* context){
   }
 
   // se guarda el mapeo en el contexto del proceso
-  set_mapping_context(context, get_mmap_count(context), addr, length, prot, fileid, initial_offset);
+  set_mapping_context(context, get_mmap_count(context), addr, length, prot, fd, initial_offset);
 
   // aumentamos localmente el numero de mmaps anclados a un proceso
   set_mmap_count(context, get_mmap_count(context) + 1);
@@ -8290,6 +8296,7 @@ void implement_munmap(uint64_t* context){
     initial_page = get_page_of_virtual_address(context_addr);
     n_pages = round_up(mapping_length, PAGESIZE) / PAGESIZE;
 
+    // recorriendo el rango del mapping addr
     while(i < n_pages){
 
       page = initial_page + i;
@@ -8308,6 +8315,92 @@ void implement_munmap(uint64_t* context){
 
   // no lo encontró.
   // sign_shrink para asignar -1 al return en un uint64_t, like openat.
+  else *(get_regs(context) + REG_A0) = sign_shrink(-1, SYSCALL_BITWIDTH);
+
+  set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
+
+}
+
+void emit_msync(){
+  create_symbol_table_entry(GLOBAL_TABLE, string_copy("msync"),
+  0, PROCEDURE, UINT64_T, 1, code_size);
+
+  emit_load(REG_A0, REG_SP, 0); // addr
+  emit_addi(REG_SP, REG_SP, WORDSIZE);
+
+  emit_addi(REG_A7, REG_ZR, SYSCALL_MSYNC);
+
+  emit_ecall();
+
+  emit_jalr(REG_ZR, REG_RA, 0);
+
+}
+
+void implement_msync(uint64_t* context){
+
+    // parameters
+  uint64_t context_addr;
+
+  // variables
+  uint64_t* mapping;
+  uint64_t mapping_length;
+  uint64_t mapping_fd;
+  uint64_t mapping_offset;
+  uint64_t mapping_fileid;
+
+  // cachepage
+  uint64_t* cachepage;
+  uint64_t* cacheframe;
+
+  // others
+  uint64_t i;
+  uint64_t actual_offset;
+
+  // page
+  uint64_t n_pages;
+
+  if (debug_syscalls){
+    printf("(msync): ");
+    print_register_value(REG_A0);   // addr
+    println();
+  }
+
+  context_addr = *(get_regs(context) + REG_A0);
+
+  // Entre todos los linkeados del proceso, buscamos el que encaje con el addr.
+  mapping = find_addr_in_mappings(context, context_addr);
+
+  // si lo encontro ...
+  if(mapping != (uint64_t*) 0){
+    mapping_length = get_mapping_length(mapping);
+    mapping_fd = get_mapping_fd(mapping);
+    mapping_fileid = *(get_fileids(context) + mapping_fd);
+    mapping_offset = get_mapping_offset(mapping);
+
+    i = 0;
+    n_pages = round_up(mapping_length, PAGESIZE) / PAGESIZE;
+
+    while(i < n_pages){
+
+      // saltando al offset actual
+      actual_offset = mapping_offset + i * PAGESIZE;
+
+      // buscando directamente los cache frames por el cache page
+      cachepage = find_cachepage(mapping_fileid, actual_offset);
+
+      // no se consideran los cachepage no mapeados
+      if(cachepage != (uint64_t*) 0){
+        cacheframe = (uint64_t*) get_cacheframe(cachepage);
+        write(mapping_fd, cacheframe, PAGESIZE);
+      }
+
+      i = i+1;
+    }
+
+    *(get_regs(context) + REG_A0) = context_addr;
+  }
+
+  // no lo encontró.
   else *(get_regs(context) + REG_A0) = sign_shrink(-1, SYSCALL_BITWIDTH);
 
   set_pc(context, get_pc(context) + INSTRUCTIONSIZE);
@@ -10647,11 +10740,20 @@ void do_ecall() {
 		if (*(registers + REG_A7) != SYSCALL_EXIT) {
 			if (*(registers + REG_A7) != SYSCALL_BRK) {
 				if (*(registers + REG_A7) != SYSCALL_WAIT) {
-					read_register(REG_A1);
-					read_register(REG_A2);
+          if(*(registers + REG_A7) != SYSCALL_MUNMAP){
+            if(*(registers + REG_A7) != SYSCALL_MSYNC){
+              read_register(REG_A1);
+              read_register(REG_A2);
 
-					if (*(registers + REG_A7) == SYSCALL_OPENAT)
-					read_register(REG_A3);
+              if (*(registers + REG_A7) == SYSCALL_OPENAT)
+                read_register(REG_A3);
+
+              if (*(registers + REG_A7) == SYSCALL_MMAP) {
+                read_register(REG_A3);
+                read_register(REG_A4);
+              }
+            }
+          }
 				}
 			}
 
