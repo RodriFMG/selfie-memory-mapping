@@ -1,0 +1,9 @@
+mmap (single y multi-page) ✓
+munmap (y aislamiento: desmapear en un proceso no afecta a otro) ✓
+msync (single, multi-page, offset≠0, escribe en el offset correcto) ✓
+fork heredando mappings (hasta 4 generaciones anidadas) ✓
+frames compartidos entre procesos (escritura de uno visible en otro) ✓
+tablas de mappings independientes por proceso ✓
+mapeo independiente no contiguo (si un file ocupa más de una page / frame de entrada, validado en PTE) ✓
+offset≠0 en read y write ✓
+bugs de integración resueltos (do_ecall, validación de segmentos, lseek, prot, bounds del fork) ✓

@@ -1,3 +1,6 @@
+// escribir datos: python3 -c "open('datos.txt','wb').write(b'A'*4096+b'B'*4096+b'C'*4096+b'D'*4096)"
+// ../selfie -c final_test.c -m 10000
+
 uint64_t main() {
   uint64_t fd;
   uint64_t p1;
