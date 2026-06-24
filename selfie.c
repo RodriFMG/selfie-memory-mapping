@@ -8132,7 +8132,7 @@ void implement_mmap(uint64_t* context){
   uint64_t length;
   uint64_t prot;
   uint64_t fd;
-  uint64_t initial_offset;
+  uint64_t initial_offset; 
 
   // variables
   uint64_t fileid;
@@ -8199,7 +8199,7 @@ void implement_mmap(uint64_t* context){
       read(fd, cacheframe, PAGESIZE);
 
       // debug <- lee bien el file y se guarda en el cacheframe?
-      printf("DEBUG: frame[0] = 0x%lX\n", *cacheframe);
+      // printf("DEBUG: frame[0] = 0x%lX\n", *cacheframe);
 
       // se crea la instancia en el cachepage como direccion
       build_cachepage(fileid, offset, (uint64_t) cacheframe);
@@ -8724,11 +8724,6 @@ void implement_fork(uint64_t* context) {
 	set_ec_timer(child, get_ec_timer(context));
 	set_mc_stack_peak(child, get_mc_stack_peak(context));
 	set_mc_mapped_heap(child, get_mc_mapped_heap(context));
-
-  printf("(fork): wiiiiii\n");
-  
-  printf("FORK: child mappings = %lu, fileids = %lu, count_padre = %lu\n",
-    (uint64_t) get_mappings(child), (uint64_t) get_fileids(child), get_mmap_count(context));
 
   // heredar mappings
   set_mmap_count(child, get_mmap_count(context));
