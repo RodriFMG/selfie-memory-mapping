@@ -2269,6 +2269,7 @@ void unblock_context(uint64_t* context);
 // | 35 | number of children	| number of forked children
 // | 36 | child exit code		| exit status code of last exited child
 // | 37 | child pid				| pid of exited child
+
 // | 38 | mapping         | para la syscall de mmap
 // | 39 | file id         | file id global del fd local del proceso.
 // | 40 | mmap count      | se podría no usar si se usa linked dinamicos en el mmap (futuro...)
@@ -7927,6 +7928,35 @@ uint64_t down_load_string(uint64_t* context, uint64_t vstring, char* s) {
 // ---------------------------- Proyecto OS ------------------------
 // -----------------------------------------------------------------
 
+// -----------------------------------------------------------------
+// ---------------------- Cache Frames Memory ----------------------
+
+uint64_t* cacheframe_memory;
+uint64_t  max_cache_frames;
+uint64_t  cacheframes_creados;
+
+void init_cacheframe_memory(){
+  max_cache_frames = 128;
+  cacheframe_memory = zmalloc(max_cache_frames * PAGESIZE);
+  cacheframes_creados = 0;
+}
+
+// Se crea de arriba hacia abajo, en el espacio dado por el zmalloc.
+uint64_t* cfalloc() {
+  uint64_t* frame;
+
+  // Espacio de cache frames lleno, acá se podría aplicar los algoritmos de LRU, optimal, fifo, etc.
+  if (cacheframes_creados >= max_cache_frames){
+    printf("Espacio de cacheframe lleno!");
+    return (uint64_t*) 0;
+  }
+
+  // Con el puntero del inicio del cache frame memory, se mueve hasta el siguiente bloque disponible.
+  frame = cacheframe_memory + cacheframes_creados * (PAGESIZE / sizeof(uint64_t));
+  cacheframes_creados = cacheframes_creados + 1;
+
+  return frame;
+}
 
 // -----------------------------------------------------------------
 // -------------------------- Cache Page ---------------------------
@@ -8190,7 +8220,7 @@ void implement_mmap(uint64_t* context){
     if(cachepage == (uint64_t*) 0){
 
       // se crea el espacio en mem fisica, como buffer
-      cacheframe = palloc();
+      cacheframe = cfalloc();
 
       // posicionando el cursos en el offset
       lseek(fd, offset, 0);
@@ -8641,7 +8671,7 @@ void implement_fork(uint64_t* context) {
 	uint64_t page;
 	uint64_t vaddr;
 
-    // parent
+  // parent
   uint64_t* parent_mapping_i;
 
   // actualziar el PTE del child para los mapeos
@@ -8668,7 +8698,7 @@ void implement_fork(uint64_t* context) {
     printf("(fork): sin params\n");
   
 
-	child = create_context (MY_CONTEXT, 0);
+	child = create_context(MY_CONTEXT, 0);
 	
 	/* Set current context pid as parent pid */
 	set_parent_process (child, context);
@@ -8774,6 +8804,7 @@ void implement_fork(uint64_t* context) {
       page = initial_page + j;
       cachepage = find_cachepage(mapping_fileid_i, actual_offset);
 
+      // si se encontró el cache page row
       if(cachepage != (uint64_t*) 0){
         cacheframe = get_cacheframe(cachepage);
         set_PTE_for_page(get_pt(child), page, (uint64_t) cacheframe);
@@ -12642,6 +12673,7 @@ uint64_t mipster(uint64_t* to_context) {
     } else if (handle_exception(from_context) == EXIT)
       return get_exit_code(from_context);
     else {
+      
       // TODO: scheduler should go here
 	  if (get_next_context(to_context) == (uint64_t *) 0) {
 		to_context = used_contexts;
@@ -12947,6 +12979,9 @@ uint64_t selfie_run(uint64_t machine, uint64_t nproc) {
   } else {
 	init_memory(atoi(peek_argument(0)));
   }
+
+  // juntito a init memory :3
+  init_cacheframe_memory();
 
   current_context = create_context(MY_CONTEXT, 0);
   boot_loader(current_context);

@@ -3,7 +3,7 @@ uint64_t main() {
   uint64_t fd;
   uint64_t valor;
 
-  fd = open("datos.txt", 2, 0);          // O_RDWR = 2
+  fd = open("ejemplo.txt", 2, 0);          // O_RDWR = 2
 
   mmap(1073741824, 4096, 2, fd, 0);      // prot = 2 (permite escritura)
 
