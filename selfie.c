@@ -7930,14 +7930,27 @@ uint64_t down_load_string(uint64_t* context, uint64_t vstring, char* s) {
 
 // -----------------------------------------------------------------
 // ---------------------- Cache Frames Memory ----------------------
+// -----------------------------------------------------------------
 
 uint64_t* cacheframe_memory;
 uint64_t  max_cache_frames;
 uint64_t  cacheframes_creados;
 
 void init_cacheframe_memory(){
+
+  uint64_t double_for_single_word;
+  double_for_single_word = sizeof(uint64_t) / WORDSIZE;
+
+  uint64_t init;
+  
   max_cache_frames = 128;
-  cacheframe_memory = zmalloc(max_cache_frames * PAGESIZE);
+
+  // según lo que vimos en 
+  init = (uint64_t) zmalloc(max_cache_frames * PAGESIZE);
+  
+  // como toda la mem se maneja en multiplo de page size, se redondea la direccion de inicio a page size
+  // similar al palloc cuando se queda sin el espacio fijo
+  cacheframe_memory = (uint64_t*) round_up(init, PAGESIZE * double_for_single_word);
   cacheframes_creados = 0;
 }
 
@@ -7955,6 +7968,7 @@ uint64_t* cfalloc() {
   frame = cacheframe_memory + cacheframes_creados * (PAGESIZE / sizeof(uint64_t));
   cacheframes_creados = cacheframes_creados + 1;
 
+  // (similar a como se maneja palloc, pero con espacio de mem fijo e independiente)
   return frame;
 }
 
@@ -7968,7 +7982,7 @@ uint64_t* used_cachepage = (uint64_t*) 0;
 // ------------------------- Machine Cache Page ---------------------
 // 0 <- next_cachepage_row
 // 1 <- file id
-// 2 <- offset
+// 2 <- file page
 // 3 <- cache frame address
 // ------------------------------------------------------------------
 
@@ -8169,7 +8183,8 @@ void implement_mmap(uint64_t* context){
   uint64_t* cachepage;
   uint64_t* cacheframe;
   
-  uint64_t offset;
+  uint64_t file_page;
+  uint64_t initial_file_page;
 
   uint64_t initial_page;
   uint64_t page;
@@ -8204,18 +8219,20 @@ void implement_mmap(uint64_t* context){
   // page inicial
   initial_page = get_page_of_virtual_address(addr);
 
+  initial_file_page = initial_offset / PAGESIZE;
+
   // Si el archivo es grande puede tener más de 1 cacheframe mapeado.
-  n_pages = round_up(length, PAGESIZE) / PAGESIZE;
+  n_pages = round_up(initial_offset % PAGESIZE + length, PAGESIZE) / PAGESIZE;
   i = 0;
 
   // recorriendo el rango de mapping addrs
   while(i < n_pages){
 
     // se avanza al siguiente page.
-    offset = initial_offset + i * PAGESIZE;
+    file_page = initial_file_page + i;
     page = initial_page + i;
 
-    cachepage = find_cachepage(fileid, offset);
+    cachepage = find_cachepage(fileid, file_page);
 
     if(cachepage == (uint64_t*) 0){
 
@@ -8223,7 +8240,7 @@ void implement_mmap(uint64_t* context){
       cacheframe = cfalloc();
 
       // posicionando el cursos en el offset
-      lseek(fd, offset, 0);
+      lseek(fd, file_page * PAGESIZE, 0);
 
       // se rellena el buffer
       read(fd, cacheframe, PAGESIZE);
@@ -8232,7 +8249,7 @@ void implement_mmap(uint64_t* context){
       // printf("DEBUG: frame[0] = 0x%lX\n", *cacheframe);
 
       // se crea la instancia en el cachepage como direccion
-      build_cachepage(fileid, offset, (uint64_t) cacheframe);
+      build_cachepage(fileid, file_page, (uint64_t) cacheframe);
     }
 
 
@@ -8333,7 +8350,7 @@ void implement_munmap(uint64_t* context){
 
     i = 0;
     initial_page = get_page_of_virtual_address(context_addr);
-    n_pages = round_up(mapping_length, PAGESIZE) / PAGESIZE;
+    n_pages = round_up(get_mapping_offset(mapping) % PAGESIZE + mapping_length, PAGESIZE) / PAGESIZE;
 
     // recorriendo el rango del mapping addr
     while(i < n_pages){
@@ -8393,7 +8410,7 @@ void implement_msync(uint64_t* context){
 
   // others
   uint64_t i;
-  uint64_t actual_offset;
+  uint64_t actual_file_page;
 
   // page
   uint64_t n_pages;
@@ -8418,20 +8435,20 @@ void implement_msync(uint64_t* context){
       mapping_offset = get_mapping_offset(mapping);
 
       i = 0;
-      n_pages = round_up(mapping_length, PAGESIZE) / PAGESIZE;
+      n_pages = round_up(mapping_offset % PAGESIZE + mapping_length, PAGESIZE) / PAGESIZE;
 
       while(i < n_pages){
 
         // saltando al offset actual
-        actual_offset = mapping_offset + i * PAGESIZE;
+        actual_file_page = mapping_offset / PAGESIZE + i;
 
         // buscando directamente los cache frames por el cache page
-        cachepage = find_cachepage(mapping_fileid, actual_offset);
+        cachepage = find_cachepage(mapping_fileid, actual_file_page);
 
         // no se consideran los cachepage no mapeados
         if(cachepage != (uint64_t*) 0){
           cacheframe = (uint64_t*) get_cacheframe(cachepage);
-          lseek(mapping_fd, actual_offset, 0);
+          lseek(mapping_fd, actual_file_page * PAGESIZE, 0);
           write(mapping_fd, cacheframe, PAGESIZE);
         }
 
@@ -8692,7 +8709,7 @@ void implement_fork(uint64_t* context) {
 
   // others
   uint64_t j;
-  uint64_t actual_offset;
+  uint64_t actual_file_page;
 	
   if (debug_syscalls) 
     printf("(fork): sin params\n");
@@ -8796,13 +8813,13 @@ void implement_fork(uint64_t* context) {
     mapping_fileid_i = *(get_fileids(child) + mapping_fd_i);
 
     initial_page = get_page_of_virtual_address(mapping_addr_i);
-    n_pages = round_up(mapping_length_i, PAGESIZE) / PAGESIZE;
+    n_pages = round_up(mapping_offset_i % PAGESIZE + mapping_length_i, PAGESIZE) / PAGESIZE;
 
     while(j < n_pages){
       
-      actual_offset = mapping_offset_i + j * PAGESIZE; 
+      actual_file_page = mapping_offset_i / PAGESIZE + j; 
       page = initial_page + j;
-      cachepage = find_cachepage(mapping_fileid_i, actual_offset);
+      cachepage = find_cachepage(mapping_fileid_i, actual_file_page);
 
       // si se encontró el cache page row
       if(cachepage != (uint64_t*) 0){

@@ -1,5 +1,5 @@
 // crear archivos (ver comandos python arriba)
-// ../selfie -c mega_final.c -m 10000
+
 uint64_t main() {
   uint64_t fd1;
   uint64_t fd2;
